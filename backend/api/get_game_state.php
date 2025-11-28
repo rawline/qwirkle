@@ -6,7 +6,7 @@ if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
 }
 
 $token = get_token_from_request();
-$playerId = $_GET['p_player_id'] ?? $_GET['player_id'] ?? null;
+$playerId = $_GET['player_id'] ?? null;
 if (!$token || !$playerId) {
     fail('p_token and p_player_id are required');
 }

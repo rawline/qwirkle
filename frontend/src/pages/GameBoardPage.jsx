@@ -25,7 +25,7 @@ export default function GameBoardPage() {
   // polling
   useEffect(() => {
     load()
-    const id = setInterval(load, 10000)
+    const id = setInterval(load, 4000)
     return () => clearInterval(id)
   }, [gameId, playerId])
 
@@ -36,11 +36,33 @@ export default function GameBoardPage() {
   const myTiles = normalized.myTiles
   const currentTurn = normalized.currentTurn
   const timeLeft = normalized.timeLeft
+  const moveTime = normalized.moveTime
+  const turnDeadline = normalized.turnDeadline
   const [selectedTile, setSelectedTile] = useState(null)
   const [placing, setPlacing] = useState(false)
   const [finishing, setFinishing] = useState(false)
+  const [countdown, setCountdown] = useState(null)
 
   const isMyTurn = currentTurn && Number(currentTurn) === me
+
+  // Live countdown using deadline
+  useEffect(() => {
+    if (!turnDeadline || !moveTime) { setCountdown(timeLeft); return }
+    const dl = new Date(turnDeadline).getTime()
+    function tick() {
+      const now = Date.now()
+      let left = Math.round((dl - now) / 1000)
+      if (left < 0) left = 0
+      setCountdown(left)
+      if (left === 0) {
+        // Force refresh a moment after timeout to trigger server auto advance
+        setTimeout(() => load(), 300)
+      }
+    }
+    tick()
+    const id = setInterval(tick, 1000)
+    return () => clearInterval(id)
+  }, [turnDeadline, moveTime])
 
   async function onBoardClick(e) {
     if (!selectedTile) return
@@ -97,7 +119,7 @@ export default function GameBoardPage() {
         {error && <div className="error">{error}</div>}
         <div className="row wrap">
           <div className="pill">Ход: {currentTurn ? `игрок #${currentTurn}` : '—'}</div>
-          <div className="pill">Время: {typeof timeLeft === 'number' ? `${timeLeft}s` : (timeLeft || '—')}</div>
+          <div className="pill">Время: {typeof countdown === 'number' ? `${countdown}s` : (timeLeft || '—')}</div>
         </div>
         {isMyTurn && (
           <div className="row" style={{ marginTop: 8 }}>
@@ -112,7 +134,7 @@ export default function GameBoardPage() {
         <h3>Игроки</h3>
         <ul className="players">
           {players.map(p => (
-            <li key={p.player_id} className={p.player_id === me ? 'me' : ''}>
+            <li key={p.player_id} className={`${p.player_id === currentTurn ? 'turn' : ''}`.trim()}>
               <div>
                 <div className="title">{p.login || `Игрок #${p.player_id}`}{p.player_id === me ? ' (вы)' : ''}</div>
                 <div className="sub">Порядок: {p.turn_order ?? '—'}</div>
@@ -175,7 +197,7 @@ function cellStyle(c) {
 // -------- helpers to normalize various DB JSON shapes --------
 function normalizeGameState(raw, gameId) {
   const gid = String(gameId)
-  const empty = { players: [], cells: [], myTiles: [], currentTurn: null, timeLeft: null }
+  const empty = { players: [], cells: [], myTiles: [], currentTurn: null, timeLeft: null, moveTime: null, turnDeadline: null }
   if (!raw || typeof raw !== 'object') return empty
   // If response is an array of games (as current get_game_state does), pick matching game_id or first.
   let game = null
@@ -229,7 +251,12 @@ function normalizeGameState(raw, gameId) {
     ])
   }
 
-  return { players, cells, myTiles, currentTurn, timeLeft }
+  // move_time
+  const moveTime = pickFirstNumber(game, ['move_time']) ?? pickFirstNumber(raw, ['move_time'])
+  // deadline ISO8601 string
+  const turnDeadline = (game.turn_deadline || game.turnDeadline || game.deadline || null) ?? deepPickFirstString(raw, ['turn_deadline', 'turnDeadline', 'deadline'])
+
+  return { players, cells, myTiles, currentTurn, timeLeft, moveTime, turnDeadline }
 }
 
 function findArrayOfObjects(obj, requiredKeys = [], minMatches = 1) {
@@ -309,6 +336,28 @@ function deepPickFirstNumber(root, keys) {
         const val = node[k]
         const n = typeof val === 'string' ? parseInt(val, 10) : val
         if (typeof n === 'number' && !Number.isNaN(n)) return n
+      }
+    }
+    if (Array.isArray(node)) {
+      for (const item of node) stack.push(item)
+    } else {
+      for (const v of Object.values(node)) stack.push(v)
+    }
+  }
+  return null
+}
+
+function deepPickFirstString(root, keys) {
+  const seen = new Set()
+  const stack = [root]
+  while (stack.length) {
+    const node = stack.pop()
+    if (!node || typeof node !== 'object' || seen.has(node)) continue
+    seen.add(node)
+    for (const k of keys) {
+      if (Object.prototype.hasOwnProperty.call(node, k)) {
+        const val = node[k]
+        if (typeof val === 'string' && val.trim()) return val
       }
     }
     if (Array.isArray(node)) {
