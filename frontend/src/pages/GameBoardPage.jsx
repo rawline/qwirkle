@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import {
   getGameState,
@@ -44,6 +44,10 @@ export default function GameBoardPage() {
   const cells = normalized.cells;
   const myTiles = normalized.myTiles;
   const currentTurn = normalized.currentTurn;
+  // find the player object for current turn (handles string/number ids)
+  const currentPlayer = (players || []).find(
+    (p) => Number(p.player_id) === Number(currentTurn)
+  );
   const timeLeft = normalized.timeLeft;
   const moveTime = normalized.moveTime;
   const turnDeadline = normalized.turnDeadline;
@@ -148,20 +152,15 @@ export default function GameBoardPage() {
         {error && <div className="error">{error}</div>}
         <div className="row wrap">
           <div className="pill">
-            Ход: {currentTurn ? `игрок #${currentTurn}` : "—"}
+            Ход:{" "}
+            {currentPlayer
+              ? currentPlayer.login || `Игрок #${currentPlayer.player_id}`
+              : "—"}
           </div>
           <div className="pill">
-            Время:{" "}
-            {typeof countdown === "number" ? `${countdown}s` : timeLeft || "—"}
+            Осталось на ход: {Math.round(timeLeft) + " секунд" || "—"}
           </div>
         </div>
-        {isMyTurn && (
-          <div className="row" style={{ marginTop: 8 }}>
-            <button className="btn" onClick={onFinishTurn} disabled={finishing}>
-              {finishing ? "Завершение…" : "Завершить ход"}
-            </button>
-          </div>
-        )}
       </section>
 
       <section className="card">
@@ -203,22 +202,42 @@ export default function GameBoardPage() {
             );
           })}
         </div>
+
+        {isMyTurn && (
+          <div className="row" style={{ marginTop: 32 }}>
+            <button className="btn" onClick={onFinishTurn} disabled={finishing}>
+              {finishing ? "Завершение…" : "Завершить ход"}
+            </button>
+          </div>
+        )}
       </section>
 
       <section className="card">
         <h3>Поле</h3>
-        <div className="board" onClick={onBoardClick}>
-          {(cells || []).slice(0, 500).map((c, idx) => (
-            <div
-              key={idx}
-              className="cell"
-              style={cellStyle(c)}
-              title={`(${c.cords_x},${c.cords_y}) ${c.color || ""} ${c.shape || ""}`}
-            >
-              {renderTileIcon(c)}
-            </div>
-          ))}
-        </div>
+        <CanvasBoard
+          cells={cells}
+          myTurn={isMyTurn}
+          selectedTile={selectedTile}
+          onPlaceTile={async (gridX, gridY) => {
+            if (!selectedTile) return;
+            try {
+              setPlacing(true);
+              await placeTile({
+                game_id: Number(gameId),
+                player_id: me,
+                tile_id: selectedTile,
+                x: gridX,
+                y: gridY,
+              });
+              setSelectedTile(null);
+              load();
+            } catch (err) {
+              setError(err.message);
+            } finally {
+              setPlacing(false);
+            }
+          }}
+        />
         <div className="sub">Всего клеток: {cells.length}</div>
       </section>
 
@@ -398,105 +417,130 @@ function renderTileIcon(t) {
   const shape = t.shape || tileShapeFromId(t.id_tile);
   const color = colorToCss(t.color || tileColorNameFromId(t.id_tile));
   const size = 36;
-  const styleBase = { width: size, height: size, background: "transparent" };
+  const styleBase = {
+    width: size,
+    height: size,
+    background: "#0b1216",
+    borderRadius: 8,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+  };
+
+  // helper wrapper ensures dark backplate for all shapes
+  const Wrapper = ({ children }) => <div style={styleBase}>{children}</div>;
+
   if (shape === "circle") {
     return (
-      <div style={{ ...styleBase, background: color, borderRadius: "50%" }} />
+      <Wrapper>
+        <div
+          style={{
+            width: size * 0.72,
+            height: size * 0.72,
+            background: color,
+            borderRadius: "50%",
+          }}
+        />
+      </Wrapper>
     );
   }
   if (shape === "square") {
-    return <div style={{ ...styleBase, background: color }} />;
+    return (
+      <Wrapper>
+        <div
+          style={{ width: size * 0.72, height: size * 0.72, background: color }}
+        />
+      </Wrapper>
+    );
   }
   if (shape === "star") {
     return (
-      <svg
-        width={size}
-        height={size}
-        viewBox="0 0 24 24"
-        fill="none"
-        xmlns="http://www.w3.org/2000/svg"
-      >
-        <path
-          d="M12 2l2.6 6.9L21 10l-5 3.6L17.2 21 12 17.8 6.8 21 8 13.6 3 10l6.4-1.1L12 2z"
-          fill={color}
-        />
-      </svg>
+      <Wrapper>
+        <svg
+          width={size * 0.9}
+          height={size * 0.9}
+          viewBox="0 0 24 24"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <path
+            d="M12 2l2.6 6.9L21 10l-5 3.6L17.2 21 12 17.8 6.8 21 8 13.6 3 10l6.4-1.1L12 2z"
+            fill={color}
+          />
+        </svg>
+      </Wrapper>
     );
   }
   if (shape === "diamond") {
     return (
-      <div
-        style={{
-          ...styleBase,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-        }}
-      >
+      <Wrapper>
         <div
           style={{
-            width: size * 0.7,
-            height: size * 0.7,
+            width: size * 0.6,
+            height: size * 0.6,
             background: color,
             transform: "rotate(45deg)",
             borderRadius: 4,
           }}
         />
-      </div>
+      </Wrapper>
     );
   }
   if (shape === "x") {
     return (
-      <svg
-        width={size}
-        height={size}
-        viewBox="0 0 24 24"
-        xmlns="http://www.w3.org/2000/svg"
-      >
-        <line
-          x1="4"
-          y1="4"
-          x2="20"
-          y2="20"
-          stroke={color}
-          strokeWidth="3"
-          strokeLinecap="round"
-        />
-        <line
-          x1="20"
-          y1="4"
-          x2="4"
-          y2="20"
-          stroke={color}
-          strokeWidth="3"
-          strokeLinecap="round"
-        />
-      </svg>
+      <Wrapper>
+        <svg
+          width={size * 0.9}
+          height={size * 0.9}
+          viewBox="0 0 24 24"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <line
+            x1="4"
+            y1="4"
+            x2="20"
+            y2="20"
+            stroke={color}
+            strokeWidth="3"
+            strokeLinecap="round"
+          />
+          <line
+            x1="20"
+            y1="4"
+            x2="4"
+            y2="20"
+            stroke={color}
+            strokeWidth="3"
+            strokeLinecap="round"
+          />
+        </svg>
+      </Wrapper>
     );
   }
   if (shape === "plus") {
     return (
-      <svg
-        width={size}
-        height={size}
-        viewBox="0 0 24 24"
-        xmlns="http://www.w3.org/2000/svg"
-      >
-        <rect x="10.5" y="4" width="3" height="16" rx="1" fill={color} />
-        <rect x="4" y="10.5" width="16" height="3" rx="1" fill={color} />
-      </svg>
+      <Wrapper>
+        <svg
+          width={size * 0.9}
+          height={size * 0.9}
+          viewBox="0 0 24 24"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <rect x="10.5" y="4" width="3" height="16" rx="1" fill={color} />
+          <rect x="4" y="10.5" width="16" height="3" rx="1" fill={color} />
+        </svg>
+      </Wrapper>
     );
   }
+
   // fallback text
   return (
     <div
       style={{
         ...styleBase,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        color: "#333",
+        color: "#ddd",
         fontSize: 10,
+        justifyContent: "center",
       }}
     >
       {shape || t.id_tile}
@@ -561,4 +605,256 @@ function deepPickFirstString(root, keys) {
     }
   }
   return null;
+}
+
+// ---- Canvas board with drag panning ----
+function CanvasBoard({ cells, myTurn, selectedTile, onPlaceTile }) {
+  const canvasRef = useRef(null);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const [dragging, setDragging] = useState(false);
+  const dragStartRef = useRef({ x: 0, y: 0 });
+  const startOffsetRef = useRef({ x: 0, y: 0 });
+
+  const size = 44; // cell size px
+  const GRID_EXTENT = 50; // number of cells in each direction from center
+  const origin = { x: GRID_EXTENT, y: GRID_EXTENT }; // grid origin shift (centers 0,0)
+  const [scale, setScale] = useState(1);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = Math.floor(rect.width * dpr);
+    canvas.height = Math.floor(rect.height * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    // clear and dark background
+    ctx.clearRect(0, 0, rect.width, rect.height);
+    ctx.fillStyle = "#080f1eff"; // dark board background
+    ctx.fillRect(0, 0, rect.width, rect.height);
+
+    // draw grid (subtle light-on-dark) across a large fixed extent
+    ctx.save();
+    ctx.translate(offset.x, offset.y);
+    ctx.scale(scale, scale);
+    ctx.strokeStyle = "#23313a";
+    ctx.lineWidth = 1;
+    // Draw vertical lines for gx in [-GRID_EXTENT..GRID_EXTENT]
+    for (let gx = -GRID_EXTENT; gx <= GRID_EXTENT; gx++) {
+      const x = (gx + origin.x) * size;
+      ctx.beginPath();
+      ctx.moveTo(x, -size * GRID_EXTENT);
+      ctx.lineTo(x, rect.height / Math.max(scale, 0.0001) + size * GRID_EXTENT);
+      ctx.stroke();
+    }
+    // Draw horizontal lines
+    for (let gy = -GRID_EXTENT; gy <= GRID_EXTENT; gy++) {
+      const y = (gy + origin.y) * size;
+      ctx.beginPath();
+      ctx.moveTo(-size * GRID_EXTENT, y);
+      ctx.lineTo(rect.width / Math.max(scale, 0.0001) + size * GRID_EXTENT, y);
+      ctx.stroke();
+    }
+
+    // draw tiles
+    for (const c of (cells || []).slice(0, 1000)) {
+      const gx = parseInt(c.cords_x ?? c.x ?? 0, 10) || 0;
+      const gy = parseInt(c.cords_y ?? c.y ?? 0, 10) || 0;
+      const px = (gx + origin.x) * size;
+      const py = (gy + origin.y) * size;
+      // cell background (dark tile backplate)
+      ctx.fillStyle = "#11171b";
+      roundRect(ctx, px + 2, py + 2, size - 4, size - 4, 6, true, false);
+      // tile icon
+      drawTileIcon(ctx, px + size / 2, py + size / 2, c);
+    }
+
+    ctx.restore();
+  }, [cells, offset]);
+
+  function onMouseDown(e) {
+    setDragging(true);
+    dragStartRef.current = { x: e.clientX, y: e.clientY };
+    startOffsetRef.current = { ...offset };
+  }
+
+  // set initial offset to center grid origin on first render
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    // world px for origin center (include half cell)
+    const worldPxX = origin.x * size + size / 2;
+    const worldPxY = origin.y * size + size / 2;
+    const ox = rect.width / 2 - scale * worldPxX;
+    const oy = rect.height / 2 - scale * worldPxY;
+    setOffset({ x: ox, y: oy });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canvasRef.current]);
+
+  // wheel zoom handler
+  function onWheel(e) {
+    // Prevent page scrolling when wheel is used over canvas
+    if (e && typeof e.preventDefault === "function") e.preventDefault();
+    // enable zoom with wheel alone
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    const mouseY = e.clientY - rect.top;
+    const delta = -e.deltaY; // invert so wheel up zooms in
+    const zoomFactor = delta > 0 ? 1.1 : 0.9;
+    const newScale = Math.max(0.4, Math.min(2.5, scale * zoomFactor));
+    // world coordinate under mouse before zoom
+    const worldX = (mouseX - offset.x) / scale;
+    const worldY = (mouseY - offset.y) / scale;
+    // compute new offset so that world point stays under mouse
+    const newOffsetX = mouseX - worldX * newScale;
+    const newOffsetY = mouseY - worldY * newScale;
+    setScale(newScale);
+    setOffset({ x: newOffsetX, y: newOffsetY });
+  }
+
+  // attach native wheel listener with passive:false to reliably prevent page scroll
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const handler = (e) => {
+      if (e && typeof e.preventDefault === "function") e.preventDefault();
+      onWheel(e);
+    };
+    canvas.addEventListener("wheel", handler, { passive: false });
+    return () => canvas.removeEventListener("wheel", handler);
+    // deliberately depend on onWheel to rebind when it changes
+  }, [onWheel]);
+  function onMouseMove(e) {
+    if (!dragging) return;
+    const dx = e.clientX - dragStartRef.current.x;
+    const dy = e.clientY - dragStartRef.current.y;
+    setOffset({
+      x: startOffsetRef.current.x + dx,
+      y: startOffsetRef.current.y + dy,
+    });
+  }
+  function onMouseUp() {
+    setDragging(false);
+  }
+  function onMouseLeave() {
+    setDragging(false);
+  }
+
+  function handleClick(e) {
+    // translate screen coords to grid
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const sx = e.clientX - rect.left - offset.x;
+    const sy = e.clientY - rect.top - offset.y;
+    const sxUnscaled = sx / scale;
+    const syUnscaled = sy / scale;
+    const gx = Math.floor(sxUnscaled / size) - origin.x;
+    const gy = Math.floor(syUnscaled / size) - origin.y;
+    if (typeof onPlaceTile === "function") onPlaceTile(gx, gy);
+  }
+
+  return (
+    <div style={{ width: "100%", height: 480 }}>
+      <canvas
+        ref={canvasRef}
+        style={{
+          width: "100%",
+          height: "100%",
+          cursor: dragging ? "grabbing" : "grab",
+          background: "#0b1220",
+        }}
+        onMouseDown={onMouseDown}
+        onMouseMove={onMouseMove}
+        onMouseUp={onMouseUp}
+        onMouseLeave={onMouseLeave}
+        onClick={handleClick}
+        onWheel={onWheel}
+      />
+    </div>
+  );
+}
+
+function drawTileIcon(ctx, cx, cy, t) {
+  const shape = t.shape || tileShapeFromId(t.id_tile);
+  const color = colorToCss(t.color || tileColorNameFromId(t.id_tile));
+  const size = 36;
+  ctx.save();
+  ctx.translate(cx - size / 2, cy - size / 2);
+  // draw dark rounded background so colored shapes pop on dark board
+  ctx.fillStyle = "#0b1216";
+  roundRect(ctx, 0, 0, size, size, 6, true, false);
+
+  if (shape === "circle") {
+    ctx.beginPath();
+    ctx.arc(size / 2, size / 2, size * 0.36, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+  } else if (shape === "square") {
+    ctx.fillStyle = color;
+    const pad = size * 0.12;
+    ctx.fillRect(pad, pad, size - pad * 2, size - pad * 2);
+  } else if (shape === "star") {
+    ctx.fillStyle = color;
+    const path = new Path2D(
+      "M12 2l2.6 6.9L21 10l-5 3.6L17.2 21 12 17.8 6.8 21 8 13.6 3 10l6.4-1.1L12 2z"
+    );
+    const scale = (size * 0.9) / 24;
+    ctx.save();
+    ctx.translate(size * 0.05, size * 0.05);
+    ctx.scale(scale, scale);
+    ctx.fill(path);
+    ctx.restore();
+  } else if (shape === "diamond") {
+    ctx.fillStyle = color;
+    ctx.save();
+    ctx.translate(size / 2, size / 2);
+    ctx.rotate(Math.PI / 4);
+    ctx.fillRect(-size * 0.28, -size * 0.28, size * 0.56, size * 0.56);
+    ctx.restore();
+  } else if (shape === "x") {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 3.5;
+    ctx.beginPath();
+    ctx.moveTo(6, 6);
+    ctx.lineTo(size - 6, size - 6);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(size - 6, 6);
+    ctx.lineTo(6, size - 6);
+    ctx.stroke();
+  } else if (shape === "plus") {
+    ctx.fillStyle = color;
+    const bar = size * 0.14;
+    ctx.fillRect(size / 2 - bar, 6, bar * 2, size - 12);
+    ctx.fillRect(6, size / 2 - bar, size - 12, bar * 2);
+  } else {
+    ctx.fillStyle = "#ddd";
+    ctx.font = "10px sans-serif";
+    ctx.fillText(String(shape || t.id_tile), 6, size / 2 + 4);
+  }
+  ctx.restore();
+}
+
+// small helper to draw rounded rect
+function roundRect(ctx, x, y, w, h, r, fill, stroke) {
+  if (typeof r === "number") r = { tl: r, tr: r, br: r, bl: r };
+  ctx.beginPath();
+  ctx.moveTo(x + r.tl, y);
+  ctx.lineTo(x + w - r.tr, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r.tr);
+  ctx.lineTo(x + w, y + h - r.br);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r.br, y + h);
+  ctx.lineTo(x + r.bl, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r.bl);
+  ctx.lineTo(x, y + r.tl);
+  ctx.quadraticCurveTo(x, y, x + r.tl, y);
+  ctx.closePath();
+  if (fill) ctx.fill();
+  if (stroke) ctx.stroke();
 }
