@@ -39,6 +39,16 @@ body {
   padding: 16px;
 }
 
+.gamesList {
+  max-width: 50%;
+  margin: 0 auto;
+  padding: 16px;
+}
+
+.gameBoardPage {
+  margin: 15px;
+}
+
 .tile.selected {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
@@ -206,7 +216,8 @@ select {
 }
 
 .tiles {
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
   gap: 8px;
   flex-wrap: wrap;
 }
@@ -235,15 +246,26 @@ select {
 }
 
 .grid {
-  display: grid;
-  grid-template-columns: 1fr;
+  display: flex;
   gap: 16px;
+}
+
+.gamePage {
+  width: 90%;
 }
 
 @media (min-width: 900px) {
   .grid {
     grid-template-columns: 1fr 1fr;
   }
+}
+
+.boardSection {
+  width: 100%;
+}
+
+.gameInfo {
+  min-width: 340px;
 }
 
 .board {

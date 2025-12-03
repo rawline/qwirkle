@@ -74,12 +74,12 @@ export async function createGame({ seats = 4, move_time = 60 } = {}) {
 }
 
 export async function getGameState({ token, playerId }) {
-  const t = token || getToken();
-  const params = new URLSearchParams({
-    p_token: String(t),
-    p_player_id: String(playerId),
+  // Send parameters in the request body; token goes as header automatically
+  return request("/get_game_state.php", {
+    method: "POST",
+    token,
+    body: { player_id: String(playerId) },
   });
-  return request(`/get_game_state.php?${params.toString()}`, { method: "GET" });
 }
 
 export async function publicGames() {
@@ -97,10 +97,10 @@ export async function deleteGame(game_id) {
   return request("/delete_game.php", { method: "POST", body: { game_id } });
 }
 
-export async function placeTile({ game_id, player_id, tile_id, x, y }) {
-  return request("/place_tile.php?debug=1", {
+export async function placeTile({ player_id, tile_id, x, y }) {
+  return request("/place_tile.php", {
     method: "POST",
-    body: { game_id, player_id, tile_id, x, y },
+    body: { player_id, tile_id, x, y },
   });
 }
 

@@ -106,8 +106,8 @@ function auto_advance_turn(PDO $pdo, int $gameId): void
     try {
         $pdo->beginTransaction();
 
-        // Lock the game row to avoid races
-        $stmt = $pdo->prepare('SELECT move_time FROM games WHERE game_id = :g FOR UPDATE');
+        // Lock the game row to avoid races (fetch seats for readiness check)
+        $stmt = $pdo->prepare('SELECT move_time, seats FROM games WHERE game_id = :g FOR UPDATE');
         $stmt->execute([':g' => $gameId]);
         $row = $stmt->fetch();
         if (!$row) {
@@ -115,6 +115,7 @@ function auto_advance_turn(PDO $pdo, int $gameId): void
             return;
         }
         $moveTime = (int) ($row['move_time'] ?? 60);
+        $seatsRequired = (int) ($row['seats'] ?? 0);
         if ($moveTime <= 0)
             $moveTime = 60;
 
@@ -123,36 +124,42 @@ function auto_advance_turn(PDO $pdo, int $gameId): void
         $stmt->execute([':g' => $gameId]);
         $players = array_map('intval', array_column($stmt->fetchAll(), 'player_id'));
         $count = count($players);
-        if ($count === 0) {
+        // If no players OR not all seats filled yet, do not advance turns
+        if ($count === 0 || ($seatsRequired > 0 && $count < $seatsRequired)) {
             $pdo->commit();
             return;
         }
 
         // Latest step for this game
-        $stmt = $pdo->prepare('SELECT s.id_player AS player_id, s.step_begin FROM steps s
-                               JOIN players p ON p.player_id = s.id_player
-                               WHERE p.game_id = :g
-                               ORDER BY s.id_step DESC
-                               LIMIT 1 FOR UPDATE');
-        $stmt->execute([':g' => $gameId]);
-        $last = $stmt->fetch();
-        if (!$last) {
-            $pdo->commit();
-            return;
-        }
+            // Latest step for this game (lock row) and compute elapsed on DB side to avoid TZ drift
+            $stmt = $pdo->prepare('SELECT s.id_player AS player_id,
+                                          EXTRACT(EPOCH FROM (NOW() - s.step_begin))::int AS elapsed
+                                   FROM steps s
+                                   JOIN players p ON p.player_id = s.id_player
+                                   WHERE p.game_id = :g
+                                   ORDER BY s.id_step DESC
+                                   LIMIT 1 FOR UPDATE');
+            $stmt->execute([':g' => $gameId]);
+            $last = $stmt->fetch();
+            if (!$last) {
+                // If no current step yet and game is full, initialize to first player
+                $firstStmt = $pdo->prepare('SELECT player_id FROM players WHERE game_id = :g ORDER BY turn_order ASC LIMIT 1');
+                $firstStmt->execute([':g' => $gameId]);
+                $firstPid = (int) ($firstStmt->fetchColumn() ?: 0);
+                if ($firstPid > 0) {
+                    $ins0 = $pdo->prepare('INSERT INTO steps (id_player, step_begin) VALUES (:pid, NOW())');
+                    $ins0->execute([':pid' => $firstPid]);
+                }
+                $pdo->commit();
+                return;
+            }
 
-        $lastPid = (int) $last['player_id'];
-        $lastTs = strtotime($last['step_begin'] ?? '');
-        if (!$lastTs) {
-            $pdo->commit();
-            return;
-        }
-
-        $elapsed = time() - $lastTs;
-        if ($elapsed < $moveTime) {
-            $pdo->commit();
-            return;
-        }
+            $lastPid = (int) $last['player_id'];
+            $elapsed = (int) ($last['elapsed'] ?? 0);
+            if ($elapsed < $moveTime) {
+                $pdo->commit();
+                return;
+            }
 
         // How many turns to advance
         $stepsToAdd = (int) floor($elapsed / $moveTime);
@@ -164,21 +171,38 @@ function auto_advance_turn(PDO $pdo, int $gameId): void
         if ($idx === false)
             $idx = 0;
 
-        // Insert next steps. For each skipped player (timed out), refill their rack up to 6.
-        $ins = $pdo->prepare('INSERT INTO steps (id_player, step_begin) VALUES (:pid, NOW())');
-        for ($i = 0; $i < $stepsToAdd; $i++) {
-            // The player whose turn just expired is at current $idx
-            $timedOutPlayerId = $players[$idx];
-            try {
-                // Refill timed-out player's rack to 6
-                refill_player_tiles($pdo, (int)$timedOutPlayerId, 6);
-            } catch (Throwable $ignore) {
-                // ignore refill errors
+        // Determine latest step row id for this game
+        $latestStmt = $pdo->prepare('SELECT s.id_step FROM steps s JOIN players p ON p.player_id = s.id_player WHERE p.game_id = :g ORDER BY s.id_step DESC LIMIT 1');
+        $latestStmt->execute([':g' => $gameId]);
+        $latestId = (int) ($latestStmt->fetchColumn() ?: 0);
+
+        // If no step exists yet (and game is full), initialize one to first player
+        if ($latestId === 0) {
+            $firstStmt = $pdo->prepare('SELECT player_id FROM players WHERE game_id = :g ORDER BY turn_order ASC LIMIT 1');
+            $firstStmt->execute([':g' => $gameId]);
+            $firstPid = (int) ($firstStmt->fetchColumn() ?: 0);
+            if ($firstPid > 0) {
+                $init = $pdo->prepare('INSERT INTO steps (id_player, step_begin) VALUES (:pid, NOW())');
+                $init->execute([':pid' => $firstPid]);
+                // refresh latest id
+                $latestStmt->execute([':g' => $gameId]);
+                $latestId = (int) ($latestStmt->fetchColumn() ?: 0);
+                $lastPid = $firstPid; // set basis for advancement
+                $elapsed = $moveTime; // force one advancement loop if needed
             }
-            // Advance to next player and insert step for them
-            $idx = ($idx + 1) % $count;
-            $ins->execute([':pid' => $players[$idx]]);
         }
+
+        // For each skipped player (timed out), refill their rack and advance current step by UPDATE
+            // Insert next steps. For each skipped player (timed out), refill their rack up to 6, then insert a new step for the next player.
+            $ins = $pdo->prepare('INSERT INTO steps (id_player, step_begin) VALUES (:pid, NOW())');
+            for ($i = 0; $i < $stepsToAdd; $i++) {
+                $timedOutPlayerId = $players[$idx];
+                try {
+                    refill_player_tiles($pdo, (int)$timedOutPlayerId, 6);
+                } catch (Throwable $ignore) {}
+                $idx = ($idx + 1) % $count;
+                $ins->execute([':pid' => $players[$idx]]);
+            }
 
         $pdo->commit();
     } catch (Throwable $e) {
@@ -375,4 +399,45 @@ function compute_score_for_step(PDO $pdo, int $gameId, int $stepId): array
     }
 
     return ['score' => $score, 'qwirkles' => $qwirkles];
+}
+
+// ---- Finished game helpers ----
+function ensure_finished_games_table(PDO $pdo): void
+{
+    try {
+        $pdo->exec('CREATE TABLE IF NOT EXISTS finished_games (
+            id_game INTEGER PRIMARY KEY,
+            winner_player_id INTEGER NOT NULL,
+            finished_at TIMESTAMP NOT NULL DEFAULT NOW()
+        )');
+    } catch (Throwable $e) {
+        // ignore table creation errors
+    }
+}
+
+function get_game_finished(PDO $pdo, int $gameId): ?int
+{
+    $stmt = $pdo->prepare('SELECT winner_player_id FROM finished_games WHERE id_game = :gid');
+    $stmt->execute([':gid' => $gameId]);
+    $w = $stmt->fetchColumn();
+    return $w ? (int)$w : null;
+}
+
+function mark_game_finished(PDO $pdo, int $gameId, int $winnerPlayerId): void
+{
+    ensure_finished_games_table($pdo);
+    // Insert only if not already finished
+    $stmt = $pdo->prepare('INSERT INTO finished_games (id_game, winner_player_id, finished_at)
+                           SELECT :gid, :wid, NOW()
+                           WHERE NOT EXISTS (SELECT 1 FROM finished_games WHERE id_game = :gid)');
+    $stmt->execute([':gid' => $gameId, ':wid' => $winnerPlayerId]);
+}
+
+function compute_winner(PDO $pdo, int $gameId): ?int
+{
+    // Winner: highest score; tie broken by lowest turn_order
+    $stmt = $pdo->prepare('SELECT player_id FROM players WHERE game_id = :gid ORDER BY score DESC, turn_order ASC LIMIT 1');
+    $stmt->execute([':gid' => $gameId]);
+    $pid = $stmt->fetchColumn();
+    return $pid ? (int)$pid : null;
 }

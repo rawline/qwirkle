@@ -20,14 +20,14 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 $token = get_token_from_request();
 if (!$token) fail('Токен обязателен', 401);
 
+// game_id не требуется: определим по player_id
 $body = read_json_body();
-$game_id = (int) ($body['game_id'] ?? 0);
 $player_id = (int) ($body['player_id'] ?? 0);
 $tile_id = (int) ($body['tile_id'] ?? 0);
 $x_raw = $body['x'] ?? null;
 $y_raw = $body['y'] ?? null;
 
-if (!$game_id || !$player_id || !$tile_id || !is_numeric($x_raw) || !is_numeric($y_raw)) {
+if (!$player_id || !$tile_id || !is_numeric($x_raw) || !is_numeric($y_raw)) {
     fail('Пропущены обязательные поля', 400);
 }
 $x = (int) $x_raw;
@@ -44,15 +44,34 @@ try {
     if (!$tok) fail('Invalid token', 401);
     $login = $tok['login'];
 
-    // Verify player ownership
-    $stmt = $pdo->prepare('SELECT login, turn_order FROM players WHERE player_id = :pid AND game_id = :gid');
-    $stmt->execute([':pid' => $player_id, ':gid' => $game_id]);
+    // Resolve player's game_id and verify ownership by login
+    $stmt = $pdo->prepare('SELECT login, turn_order, game_id FROM players WHERE player_id = :pid');
+    $stmt->execute([':pid' => $player_id]);
     $pRow = $stmt->fetch(PDO::FETCH_ASSOC);
-    if (!$pRow) fail('Игрок не в игре', 404);
+    if (!$pRow) fail('Игрок не найден', 404);
     if ($pRow['login'] !== $login) fail('Не ваш игрок', 403);
+    $game_id = (int) ($pRow['game_id'] ?? 0);
+    if ($game_id <= 0) fail('Игра не найдена для игрока', 404);
 
-    // Advance turn automatically if needed (timeouts)
-    auto_advance_turn($pdo, $game_id);
+    // Ensure game is full (all seats occupied) before allowing moves
+    $seatStmt = $pdo->prepare('SELECT g.seats, COUNT(p.player_id) AS cnt
+                               FROM games g LEFT JOIN players p ON p.game_id = g.game_id
+                               WHERE g.game_id = :gid
+                               GROUP BY g.seats');
+    $seatStmt->execute([':gid' => $game_id]);
+    $seatRow = $seatStmt->fetch(PDO::FETCH_ASSOC);
+    if (!$seatRow) fail('Игра не найдена', 404);
+    if ((int)$seatRow['seats'] > 0 && (int)$seatRow['cnt'] < (int)$seatRow['seats']) {
+        fail('Игра ещё не набрала всех игроков', 409);
+    }
+
+    // Block moves if game already finished
+    $winner = get_game_finished($pdo, $game_id);
+    if ($winner !== null) {
+        fail('Игра уже завершена', 409);
+    }
+
+    // Не продвигаем ход здесь, чтобы избежать гонок. Таймауты обрабатываются в get_game_state/finish_turn.
 
     // Determine current turn player
     $stmt = $pdo->prepare('SELECT s.id_player FROM steps s JOIN players p ON p.player_id = s.id_player WHERE p.game_id = :gid ORDER BY s.id_step DESC LIMIT 1');
@@ -144,9 +163,9 @@ try {
         };
 
         $hValid = $validateLine($horTiles, $newShape, $newColor);
-        if (!$hValid[0]) fail('Horizontal line invalid: ' . $hValid[1], 409);
+        if (!$hValid[0]) fail($hValid[1], 409);
         $vValid = $validateLine($verTiles, $newShape, $newColor);
-        if (!$vValid[0]) fail('Vertical line invalid: ' . $vValid[1], 409);
+        if (!$vValid[0]) fail($vValid[1], 409);
 
         // Prevent identical tile in combined lines
         foreach (array_merge($horTiles, $verTiles) as $t) {

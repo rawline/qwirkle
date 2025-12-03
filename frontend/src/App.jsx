@@ -45,30 +45,28 @@ export default function App() {
   return (
     <div>
       <Nav />
-      <main className="container">
-        <Routes>
-          <Route path="/" element={<Navigate to="/games" replace />} />
-          <Route path="/login" element={<LoginPage />} />
-          <Route path="/register" element={<RegisterPage />} />
-          <Route
-            path="/games"
-            element={
-              <RequireAuth>
-                <GameListPage />
-              </RequireAuth>
-            }
-          />
-          <Route
-            path="/game/:gameId/:playerId"
-            element={
-              <RequireAuth>
-                <GameBoardPage />
-              </RequireAuth>
-            }
-          />
-          <Route path="*" element={<Navigate to="/games" replace />} />
-        </Routes>
-      </main>
+      <Routes>
+        <Route path="/" element={<Navigate to="/games" replace />} />
+        <Route path="/login" element={<LoginPage />} />
+        <Route path="/register" element={<RegisterPage />} />
+        <Route
+          path="/games"
+          element={
+            <RequireAuth>
+              <GameListPage />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="/game/:gameId/:playerId"
+          element={
+            <RequireAuth>
+              <GameBoardPage />
+            </RequireAuth>
+          }
+        />
+        <Route path="*" element={<Navigate to="/games" replace />} />
+      </Routes>
     </div>
   );
 }

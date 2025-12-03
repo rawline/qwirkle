@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useParams, useNavigate } from "react-router-dom";
+import toast, { Toaster } from "react-hot-toast";
 import {
   getGameState,
   getToken,
@@ -8,32 +9,38 @@ import {
   finishTurn,
 } from "../api/api.js";
 
+const errorToast = (text) => toast.error(text);
+const successToast = (text) => toast.success(text);
+const infoToast = (text) => toast(text);
+
 export default function GameBoardPage() {
   const { gameId, playerId } = useParams();
+  const navigate = useNavigate();
   const [state, setState] = useState(null);
-  const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const [closedBanner, setClosedBanner] = useState(false);
+  const pollIdRef = useRef(null);
+  const stopRef = useRef(false);
   const me = Number(playerId);
-  const myLogin = getLogin();
 
   async function load() {
-    setError("");
+    if (stopRef.current) return; // hard stop when finished
     try {
       const data = await getGameState({ token: getToken(), playerId });
       setState(data);
     } catch (err) {
-      setError(err.message);
+      errorToast(err.message);
     } finally {
       setLoading(false);
     }
   }
 
-  // polling
+  // reset manual banner close when switching game
   useEffect(() => {
-    load();
-    const id = setInterval(load, 4000);
-    return () => clearInterval(id);
-  }, [gameId, playerId]);
+    setClosedBanner(false);
+  }, [gameId]);
+
+  // (moved below normalized state) polling effect depends on gameFinished
 
   const normalized = useMemo(
     () => normalizeGameState(state, gameId),
@@ -44,6 +51,11 @@ export default function GameBoardPage() {
   const cells = normalized.cells;
   const myTiles = normalized.myTiles;
   const currentTurn = normalized.currentTurn;
+  const gameFinished = normalized.gameFinished;
+  const winnerPlayerId = normalized.winnerPlayerId;
+  const winnerPlayer = (players || []).find(
+    (p) => Number(p.player_id) === Number(winnerPlayerId)
+  );
   // find the player object for current turn (handles string/number ids)
   const currentPlayer = (players || []).find(
     (p) => Number(p.player_id) === Number(currentTurn)
@@ -57,6 +69,41 @@ export default function GameBoardPage() {
   const [countdown, setCountdown] = useState(null);
 
   const isMyTurn = currentTurn && Number(currentTurn) === me;
+  const lockout = !!gameFinished;
+
+  // polling: stop when game is finished (banner shown/closable manually)
+  useEffect(() => {
+    // Always do an initial fetch on mount or when params change
+    load();
+    // clear any previous interval
+    if (pollIdRef.current) {
+      clearInterval(pollIdRef.current);
+      pollIdRef.current = null;
+    }
+    if (gameFinished) {
+      // ensure no further polling
+      stopRef.current = true;
+      return; // stop polling when finished
+    }
+    pollIdRef.current = setInterval(load, 4000);
+    return () => {
+      if (pollIdRef.current) {
+        clearInterval(pollIdRef.current);
+        pollIdRef.current = null;
+      }
+    };
+  }, [gameId, playerId, gameFinished]);
+
+  // when finished due to any source, immediately stop networking
+  useEffect(() => {
+    if (gameFinished) {
+      stopRef.current = true;
+      if (pollIdRef.current) {
+        clearInterval(pollIdRef.current);
+        pollIdRef.current = null;
+      }
+    }
+  }, [gameFinished]);
 
   // Live countdown using deadline
   useEffect(() => {
@@ -82,8 +129,12 @@ export default function GameBoardPage() {
 
   async function onBoardClick(e) {
     if (!selectedTile) return;
+    if (lockout) {
+      infoToast("Игра завершена");
+      return;
+    }
     if (!isMyTurn) {
-      setError("Сейчас не ваш ход");
+      errorToast("Сейчас не ваш ход");
       return;
     }
     // determine grid coords
@@ -105,15 +156,19 @@ export default function GameBoardPage() {
       setSelectedTile(null);
       load(); // quick refresh
     } catch (err) {
-      setError(err.message);
+      errorToast(err.message);
     } finally {
       setPlacing(false);
     }
   }
 
   async function onFinishTurn() {
+    if (lockout) {
+      infoToast("Игра завершена");
+      return;
+    }
     if (!isMyTurn) {
-      setError("Сейчас не ваш ход");
+      errorToast("Сейчас не ваш ход");
       return;
     }
     try {
@@ -136,52 +191,172 @@ export default function GameBoardPage() {
           return { ...prev, current_turn: res.next_player_id };
         });
       }
+      // If backend says game finished, reflect it immediately in UI
+      if (res && res.game_finished) {
+        // stop any polling and further loads right away
+        stopRef.current = true;
+        if (pollIdRef.current) {
+          clearInterval(pollIdRef.current);
+          pollIdRef.current = null;
+        }
+        setState((prev) => {
+          if (!prev) return prev;
+          if (Array.isArray(prev)) {
+            return prev.map((g) =>
+              g.game_id == gameId
+                ? {
+                    ...g,
+                    game_finished: true,
+                    winner_player_id:
+                      res.winner_player_id ?? g.winner_player_id,
+                    current_turn: null,
+                    remaining_time: 0,
+                  }
+                : g
+            );
+          }
+          return {
+            ...prev,
+            game_finished: true,
+            winner_player_id: res.winner_player_id ?? prev.winner_player_id,
+            current_turn: null,
+            remaining_time: 0,
+          };
+        });
+        if (res.winner_player_id) {
+          const wp = (players || []).find(
+            (p) => Number(p.player_id) === Number(res.winner_player_id)
+          );
+          infoToast(
+            `Игра завершена. Победитель: ${wp ? wp.login : "#" + res.winner_player_id}`
+          );
+        }
+        return; // do not trigger immediate reload after finishing
+      }
       load();
     } catch (err) {
-      setError(err.message);
+      errorToast(err.message);
     } finally {
       setFinishing(false);
     }
   }
 
   return (
-    <div className="grid">
-      <section className="card">
-        <h2>Игра #{gameId}</h2>
-        {loading && <div>Загрузка…</div>}
-        {error && <div className="error">{error}</div>}
-        <div className="row wrap">
-          <div className="pill">
-            Ход:{" "}
-            {currentPlayer
-              ? currentPlayer.login || `Игрок #${currentPlayer.player_id}`
-              : "—"}
-          </div>
-          <div className="pill">
-            Осталось на ход: {Math.round(timeLeft) + " секунд" || "—"}
+    <div className="grid gameBoardPage">
+      {gameFinished && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.6)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 1000,
+          }}
+        >
+          <div
+            style={{
+              width: "min(520px, 92vw)",
+              background: "#0e1621",
+              border: "1px solid #2b3a45",
+              borderRadius: 12,
+              padding: 24,
+              boxShadow: "0 12px 40px rgba(0,0,0,0.45)",
+              color: "#e8f0f5",
+              textAlign: "center",
+            }}
+          >
+            <div style={{ fontSize: 22, fontWeight: 700, marginBottom: 8 }}>
+              Игра завершена
+            </div>
+            <div style={{ opacity: 0.9, marginBottom: 16 }}>
+              Победитель: {winnerPlayer ? winnerPlayer.login : "—"}
+              {winnerPlayerId ? ` (#${winnerPlayerId})` : ""}
+            </div>
+            <button
+              className="btn"
+              onClick={() => {
+                navigate("/games");
+              }}
+            >
+              Вернуться к списку игр
+            </button>
           </div>
         </div>
-      </section>
+      )}
+      <div className="gameInfo">
+        <section className="card">
+          <h2>Игра #{gameId}</h2>
+          {loading && <div>Загрузка…</div>}
+          <div className="row wrap">
+            <div className="pill">
+              Ход:{" "}
+              {currentPlayer
+                ? currentPlayer.login || `Игрок #${currentPlayer.player_id}`
+                : "—"}
+            </div>
+            <div className="pill">
+              Осталось на ход:{" "}
+              {gameFinished ? "—" : Math.round(timeLeft) + " секунд" || "—"}
+            </div>
+          </div>
+        </section>
 
-      <section className="card">
-        <h3>Игроки</h3>
-        <ul className="players">
-          {players.map((p) => (
-            <li
-              key={p.player_id}
-              className={`${p.player_id === currentTurn ? "turn" : ""}`.trim()}
-            >
-              <div>
-                <div className="title">
-                  {p.login || `Игрок #${p.player_id}`}
-                  {p.player_id === me ? " (вы)" : ""}
+        <section className="card">
+          <h3>Игроки</h3>
+          <ul className="players">
+            {players.map((p) => (
+              <li
+                key={p.player_id}
+                className={`${p.player_id === currentTurn ? "turn" : ""}`.trim()}
+              >
+                <div>
+                  <div className="title">
+                    {p.login || `Игрок #${p.player_id}`}
+                    {p.player_id === me ? " (вы)" : ""}
+                  </div>
+                  <div className="sub">Порядок: {p.turn_order ?? "—"}</div>
                 </div>
-                <div className="sub">Порядок: {p.turn_order ?? "—"}</div>
-              </div>
-              <div className="score">{p.score ?? 0} очков</div>
-            </li>
-          ))}
-        </ul>
+                <div className="score">{p.score ?? 0} очков</div>
+              </li>
+            ))}
+          </ul>
+        </section>
+      </div>
+
+      <section className="card boardSection">
+        <h3>Поле</h3>
+        <CanvasBoard
+          cells={cells}
+          myTurn={isMyTurn && !lockout}
+          disabled={lockout}
+          selectedTile={selectedTile}
+          onPlaceTile={async (gridX, gridY) => {
+            if (!selectedTile) return;
+            if (lockout) {
+              infoToast("Игра завершена");
+              return;
+            }
+            try {
+              setPlacing(true);
+              await placeTile({
+                game_id: Number(gameId),
+                player_id: me,
+                tile_id: selectedTile,
+                x: gridX,
+                y: gridY,
+              });
+              setSelectedTile(null);
+              load();
+            } catch (err) {
+              errorToast(err.message);
+            } finally {
+              setPlacing(false);
+            }
+          }}
+        />
+        <div className="sub">Всего клеток: {cells.length}</div>
       </section>
 
       <section className="card">
@@ -195,7 +370,10 @@ export default function GameBoardPage() {
                 key={id}
                 className={`tile${selected ? " selected" : ""}`}
                 title={`${t.color || ""} ${t.shape || ""}`.trim()}
-                onClick={() => setSelectedTile(t.id || t.id_tile)}
+                onClick={() => {
+                  if (lockout) return;
+                  setSelectedTile(t.id || t.id_tile);
+                }}
               >
                 {renderTileIcon(t)}
               </div>
@@ -205,46 +383,18 @@ export default function GameBoardPage() {
 
         {isMyTurn && (
           <div className="row" style={{ marginTop: 32 }}>
-            <button className="btn" onClick={onFinishTurn} disabled={finishing}>
+            <button
+              className="btn"
+              onClick={onFinishTurn}
+              disabled={finishing || lockout}
+            >
               {finishing ? "Завершение…" : "Завершить ход"}
             </button>
           </div>
         )}
       </section>
 
-      <section className="card">
-        <h3>Поле</h3>
-        <CanvasBoard
-          cells={cells}
-          myTurn={isMyTurn}
-          selectedTile={selectedTile}
-          onPlaceTile={async (gridX, gridY) => {
-            if (!selectedTile) return;
-            try {
-              setPlacing(true);
-              await placeTile({
-                game_id: Number(gameId),
-                player_id: me,
-                tile_id: selectedTile,
-                x: gridX,
-                y: gridY,
-              });
-              setSelectedTile(null);
-              load();
-            } catch (err) {
-              setError(err.message);
-            } finally {
-              setPlacing(false);
-            }
-          }}
-        />
-        <div className="sub">Всего клеток: {cells.length}</div>
-      </section>
-
-      <section className="card">
-        <h3>Отладка</h3>
-        <pre className="pre">{JSON.stringify(state, null, 2)}</pre>
-      </section>
+      <Toaster position="bottom-right" />
     </div>
   );
 }
@@ -282,6 +432,8 @@ function normalizeGameState(raw, gameId) {
     timeLeft: null,
     moveTime: null,
     turnDeadline: null,
+    gameFinished: false,
+    winnerPlayerId: null,
   };
   if (!raw || typeof raw !== "object") return empty;
   // If response is an array of games (as current get_game_state does), pick matching game_id or first.
@@ -370,6 +522,16 @@ function normalizeGameState(raw, gameId) {
     (game.turn_deadline || game.turnDeadline || game.deadline || null) ??
     deepPickFirstString(raw, ["turn_deadline", "turnDeadline", "deadline"]);
 
+  // finished state
+  const gameFinished = Boolean(
+    (Object.prototype.hasOwnProperty.call(game, "game_finished") &&
+      game.game_finished) ||
+    deepPickFirstNumber(raw, ["game_finished"]) === 1
+  );
+  const winnerPlayerId =
+    pickFirstNumber(game, ["winner_player_id"]) ??
+    deepPickFirstNumber(raw, ["winner_player_id"]);
+
   return {
     players,
     cells,
@@ -378,6 +540,8 @@ function normalizeGameState(raw, gameId) {
     timeLeft,
     moveTime,
     turnDeadline,
+    gameFinished,
+    winnerPlayerId,
   };
 }
 
@@ -608,7 +772,7 @@ function deepPickFirstString(root, keys) {
 }
 
 // ---- Canvas board with drag panning ----
-function CanvasBoard({ cells, myTurn, selectedTile, onPlaceTile }) {
+function CanvasBoard({ cells, myTurn, selectedTile, onPlaceTile, disabled }) {
   const canvasRef = useRef(null);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const [dragging, setDragging] = useState(false);
@@ -746,6 +910,7 @@ function CanvasBoard({ cells, myTurn, selectedTile, onPlaceTile }) {
   }
 
   function handleClick(e) {
+    if (disabled) return;
     // translate screen coords to grid
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -766,7 +931,7 @@ function CanvasBoard({ cells, myTurn, selectedTile, onPlaceTile }) {
         style={{
           width: "100%",
           height: "100%",
-          cursor: dragging ? "grabbing" : "grab",
+          cursor: disabled ? "not-allowed" : dragging ? "grabbing" : "grab",
           background: "#0b1220",
         }}
         onMouseDown={onMouseDown}

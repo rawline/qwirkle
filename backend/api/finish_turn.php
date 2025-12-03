@@ -13,31 +13,45 @@ $token = get_token_from_request();
 if (!$token)
     fail('Token required', 401);
 $body = read_json_body();
-$game_id = (int) ($body['game_id'] ?? 0);
 $player_id = (int) ($body['player_id'] ?? 0);
-if (!$game_id || !$player_id)
-    fail('Пропущены game_id или player_id', 400);
+if (!$player_id)
+    fail('Пропущен player_id', 400);
 
 $pdo = null;
 try {
     $pdo = db();
 
-    // Resolve login from token
+    // Resolve login from token (treat token as string)
     $stmt = $pdo->prepare('SELECT login FROM tokens WHERE token = :t');
-    $stmt->execute([':t' => (int) $token]);
+    $stmt->execute([':t' => $token]);
     $tok = $stmt->fetch();
     if (!$tok)
         fail('Invalid token', 401);
     $login = $tok['login'];
 
-    // Verify player ownership
-    $stmt = $pdo->prepare('SELECT login FROM players WHERE player_id = :pid AND game_id = :gid');
-    $stmt->execute([':pid' => $player_id, ':gid' => $game_id]);
+    // Resolve player's game_id and verify ownership
+    $stmt = $pdo->prepare('SELECT login, game_id FROM players WHERE player_id = :pid');
+    $stmt->execute([':pid' => $player_id]);
     $pRow = $stmt->fetch();
     if (!$pRow)
         fail('Player not in game', 404);
     if ($pRow['login'] !== $login)
         fail('Not your player', 403);
+    $game_id = (int) ($pRow['game_id'] ?? 0);
+    if ($game_id <= 0)
+        fail('Game not found for player', 404);
+
+    // Ensure game is full (all seats occupied) before allowing turn finish actions
+    $seatStmt = $pdo->prepare('SELECT g.seats, COUNT(p.player_id) AS cnt
+                               FROM games g LEFT JOIN players p ON p.game_id = g.game_id
+                               WHERE g.game_id = :gid
+                               GROUP BY g.seats');
+    $seatStmt->execute([':gid' => $game_id]);
+    $seatRow = $seatStmt->fetch(PDO::FETCH_ASSOC);
+    if (!$seatRow) fail('Game not found', 404);
+    if ((int)$seatRow['seats'] > 0 && (int)$seatRow['cnt'] < (int)$seatRow['seats']) {
+        fail('Game not full yet', 409);
+    }
 
     // Apply timeout-based advancement first
     auto_advance_turn($pdo, $game_id);
@@ -76,10 +90,17 @@ try {
     }
 
     // Check remaining tiles in pool (not assigned to any player nor placed on any board)
+    // Remaining tiles should be computed per game, not globally
     $remStmt = $pdo->prepare('SELECT COUNT(*) FROM tiles t
-                              WHERE NOT EXISTS (SELECT 1 FROM players_tiles pt WHERE pt.id_tile = t.id)
-                              AND NOT EXISTS (SELECT 1 FROM cells c WHERE c.id_tile = t.id)');
-    $remStmt->execute();
+                              WHERE NOT EXISTS (
+                                  SELECT 1 FROM players_tiles pt
+                                  JOIN players p ON p.player_id = pt.id_player
+                                  WHERE pt.id_tile = t.id AND p.game_id = :gid
+                              )
+                              AND NOT EXISTS (
+                                  SELECT 1 FROM cells c WHERE c.id_tile = t.id AND c.id_game = :gid
+                              )');
+    $remStmt->execute([':gid' => $game_id]);
     $remainingTiles = (int) $remStmt->fetchColumn();
 
     // If player had zero tiles before refill and there are no remaining tiles, they finished the game
@@ -88,14 +109,8 @@ try {
         $endGameBonus = 6;
     }
 
-    // Now perform refill and advance turn inside a transaction
+    // Now perform scoring, (optionally) refill, and possibly end the game inside a transaction
     $pdo->beginTransaction();
-    // Refill finisher's rack up to 6 before passing the turn
-    try {
-        refill_player_tiles($pdo, $player_id, 6);
-    } catch (Throwable $ignore) {
-        // ignore refill errors
-    }
 
     $stmt = $pdo->prepare('SELECT player_id FROM players WHERE game_id = :gid ORDER BY turn_order');
     $stmt->execute([':gid' => $game_id]);
@@ -109,14 +124,33 @@ try {
     $nextIdx = ($idx === false) ? 0 : (($idx + 1) % count($asInts));
     $nextPlayerId = (int) $asInts[$nextIdx];
 
-    // Update player's score with computed delta and possible end-game bonus
+    // End-of-game condition: player had 0 tiles before refill AND no remaining tiles in pool (for this game)
+    $gameFinished = ($tilesBeforeRefill === 0 && $remainingTiles === 0);
+
+    // Update player's score with computed delta and possible end-game bonus (once)
     if ($scoreDelta !== 0 || $endGameBonus !== 0) {
         $upd = $pdo->prepare('UPDATE players SET score = COALESCE(score,0) + :delta WHERE player_id = :pid');
         $upd->execute([':delta' => $scoreDelta + $endGameBonus, ':pid' => $player_id]);
     }
 
-    $stmt = $pdo->prepare('INSERT INTO steps (id_player, step_begin) VALUES (:pid, NOW())');
-    $stmt->execute([':pid' => $nextPlayerId]);
+    $winnerId = null;
+    if ($gameFinished) {
+        // Compute winner and mark finished; do not insert next step
+        try {
+            $winnerId = compute_winner($pdo, $game_id);
+            if ($winnerId !== null) mark_game_finished($pdo, $game_id, $winnerId);
+        } catch (Throwable $ignore) {}
+    } else {
+        // Refill finisher's rack up to 6 before passing the turn
+        try {
+            refill_player_tiles($pdo, $player_id, 6);
+        } catch (Throwable $ignore) {
+            // ignore refill errors
+        }
+        // Insert a new step for the next player (new id per turn)
+        $ins = $pdo->prepare('INSERT INTO steps (id_player, step_begin) VALUES (:pid, NOW())');
+        $ins->execute([':pid' => $nextPlayerId]);
+    }
 
     // Clean up placed_tiles for this step to avoid double scoring
     try {
@@ -128,7 +162,15 @@ try {
 
     $pdo->commit();
 
-    respond(['success' => true, 'next_player_id' => $nextPlayerId, 'score_delta' => $scoreDelta, 'qwirkles' => $qwirklesDone, 'end_game_bonus' => $endGameBonus]);
+    respond([
+        'success' => true,
+        'next_player_id' => $gameFinished ? null : $nextPlayerId,
+        'score_delta' => $scoreDelta,
+        'qwirkles' => $qwirklesDone,
+        'end_game_bonus' => $endGameBonus,
+        'game_finished' => $gameFinished,
+        'winner_player_id' => $winnerId
+    ]);
 } catch (Throwable $e) {
     if ($pdo instanceof PDO && $pdo->inTransaction())
         $pdo->rollBack();

@@ -1,14 +1,20 @@
 <?php
 require __DIR__ . '/_bootstrap.php';
 
-if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
+// Accept both GET and POST; prefer JSON body for inputs
+if (!in_array($_SERVER['REQUEST_METHOD'], ['GET', 'POST'], true)) {
     fail('Method not allowed', 405);
 }
 
+// перенести плейер id в тело, убрать из параметров
 $token = get_token_from_request();
-$playerId = $_GET['p_player_id'] ?? $_GET['player_id'] ?? null;
+$body = read_json_body();
+// Prefer body, fallback to query params for backward compatibility
+$playerId = $body['player_id']
+    ?? $body['p_player_id']
+    ?? ($_GET['p_player_id'] ?? $_GET['player_id'] ?? null);
 if (!$token || !$playerId) {
-    fail('p_token and p_player_id are required');
+    fail('player_id (в теле запроса) и токен обязательны');
 }
 
 try {
@@ -48,7 +54,11 @@ try {
         }
         $pdo2 = $pdo; // reuse connection
         $gStmt = $pdo2->prepare('SELECT move_time FROM games WHERE game_id = :g');
-        $sStmt = $pdo2->prepare('SELECT s.step_begin FROM steps s JOIN players p ON p.player_id = s.id_player WHERE p.game_id = :g ORDER BY s.id_step DESC LIMIT 1');
+        // Compute elapsed seconds on DB side to avoid timezone drift between PHP and DB
+        $sStmt = $pdo2->prepare('SELECT EXTRACT(EPOCH FROM (NOW() - s.step_begin))::int AS elapsed
+                     FROM steps s JOIN players p ON p.player_id = s.id_player
+                     WHERE p.game_id = :g
+                     ORDER BY s.id_step DESC LIMIT 1');
         foreach ($gamesArr as &$gobj) {
             if (!is_array($gobj))
                 continue;
@@ -61,17 +71,23 @@ try {
             $gStmt->execute([':g' => $gid2]);
             $moveTime = (int) ($gStmt->fetchColumn() ?: 60);
             $sStmt->execute([':g' => $gid2]);
-            $lastStep = $sStmt->fetchColumn();
+            $elapsedSec = $sStmt->fetchColumn();
             $remaining = null;
-            if ($lastStep) {
-                $lastTs = strtotime($lastStep);
-                if ($lastTs) {
-                    $elapsed = time() - $lastTs;
-                    $remaining = $moveTime - $elapsed;
-                    if ($remaining < 0)
-                        $remaining = 0;
-                }
+            if ($elapsedSec !== false && $elapsedSec !== null) {
+                $remaining = $moveTime - (int)$elapsedSec;
+                if ($remaining < 0) $remaining = 0;
             }
+            // attach finished status and winner
+            try {
+                $winnerId = get_game_finished($pdo2, $gid2);
+                if ($winnerId !== null) {
+                    $gobj['game_finished'] = true;
+                    $gobj['winner_player_id'] = $winnerId;
+                    $remaining = 0; // no time remaining in finished game
+                } else {
+                    $gobj['game_finished'] = false;
+                }
+            } catch (Throwable $ignore) {}
             $gobj['remaining_time'] = $remaining; // may be null if cannot compute
         }
         // Write back into original structure
@@ -154,6 +170,21 @@ try {
     } catch (Throwable $e2) {
         // ignore enrichment errors
     }
+    // If the requested player's game is finished, short-circuit with 410 Gone for subsequent polling clients
+    try {
+        $gidCheck = (int)$gid;
+        if ($gidCheck) {
+            $winnerId = get_game_finished($pdo, $gidCheck);
+            if ($winnerId !== null) {
+                respond([
+                    'error' => 'Игра завершена',
+                    'game_finished' => true,
+                    'winner_player_id' => $winnerId,
+                ], 410);
+            }
+        }
+    } catch (Throwable $ignore) {}
+
     respond($data);
 } catch (Throwable $e) {
     fail('get_game_state failed: ' . $e->getMessage(), 500);

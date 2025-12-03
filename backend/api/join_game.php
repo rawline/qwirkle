@@ -64,6 +64,31 @@ try {
     refill_player_tiles($pdo, $player_id, 6);
 
     $pdo->commit();
+    // Если игра стала полной (players == seats), создаём/инициализируем текущий шаг на первого игрока
+    try {
+        $chk = $pdo->prepare('SELECT g.seats, COUNT(p.player_id) AS cnt FROM games g LEFT JOIN players p ON p.game_id = g.game_id WHERE g.game_id = :g GROUP BY g.seats');
+        $chk->execute([':g' => $game_id]);
+        $row2 = $chk->fetch(PDO::FETCH_ASSOC);
+        if ($row2 && (int)$row2['seats'] > 0 && (int)$row2['cnt'] >= (int)$row2['seats']) {
+            // игра полная — найдём первого по порядку
+            $firstStmt = $pdo->prepare('SELECT player_id FROM players WHERE game_id = :g ORDER BY turn_order ASC LIMIT 1');
+            $firstStmt->execute([':g' => $game_id]);
+            $firstPid = (int)$firstStmt->fetchColumn();
+            if ($firstPid > 0) {
+                // проверим, есть ли уже шаг
+                $hasStep = $pdo->prepare('SELECT s.id_step FROM steps s JOIN players p ON p.player_id = s.id_player WHERE p.game_id = :g ORDER BY s.id_step DESC LIMIT 1');
+                $hasStep->execute([':g' => $game_id]);
+                $existingStep = $hasStep->fetchColumn();
+                if (!$existingStep) {
+                    // создать стартовый шаг
+                    $ins = $pdo->prepare('INSERT INTO steps (id_player, step_begin) VALUES (:pid, NOW())');
+                    $ins->execute([':pid' => $firstPid]);
+                }
+            }
+        }
+    } catch (Throwable $ignore) {
+        // игнорируем ошибки инициализации шага
+    }
 
     respond(['game_id' => $game_id, 'player_id' => $player_id]);
 } catch (Throwable $e) {
