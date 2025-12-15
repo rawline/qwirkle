@@ -13,8 +13,6 @@ $body = read_json_body();
 $seats = isset($body['seats']) ? (int) $body['seats'] : 4;
 $move_time = isset($body['move_time']) ? (int) $body['move_time'] : 60;
 
-$move_time += 1000;
-
 // prepare $pdo for catch scope
 $pdo = null;
 try {

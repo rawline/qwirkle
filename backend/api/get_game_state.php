@@ -27,6 +27,7 @@ try {
         auto_advance_turn($pdo, $gid);
     }
     $stmt = $pdo->prepare('SELECT get_game_state(:p_token, :p_player_id) AS res');
+    // token is stored as string; do NOT cast to int
     $stmt->execute([':p_token' => (int) $token, ':p_player_id' => (int) $playerId]);
     $row = $stmt->fetch();
     if (!$row)
@@ -59,6 +60,14 @@ try {
                      FROM steps s JOIN players p ON p.player_id = s.id_player
                      WHERE p.game_id = :g
                      ORDER BY s.id_step DESC LIMIT 1');
+        // Absolute deadline of the current turn (server time)
+        $dlStmt = $pdo2->prepare('SELECT (s.step_begin + (g.move_time || " seconds")::interval) AS deadline
+                      FROM steps s
+                      JOIN players p ON p.player_id = s.id_player
+                      JOIN games g ON g.game_id = p.game_id
+                      WHERE p.game_id = :g
+                      ORDER BY s.id_step DESC
+                      LIMIT 1');
         foreach ($gamesArr as &$gobj) {
             if (!is_array($gobj))
                 continue;
@@ -77,6 +86,19 @@ try {
                 $remaining = $moveTime - (int)$elapsedSec;
                 if ($remaining < 0) $remaining = 0;
             }
+
+            // server deadline for client-side synced timer
+            $turnDeadline = null;
+            try {
+                $dlStmt->execute([':g' => $gid2]);
+                $dl = $dlStmt->fetchColumn();
+                if ($dl) {
+                    // PDO returns timestamp as string; pass through (ISO-like) for client
+                    $turnDeadline = (string)$dl;
+                }
+            } catch (Throwable $ignore) {
+                $turnDeadline = null;
+            }
             // attach finished status and winner
             try {
                 $winnerId = get_game_finished($pdo2, $gid2);
@@ -84,11 +106,13 @@ try {
                     $gobj['game_finished'] = true;
                     $gobj['winner_player_id'] = $winnerId;
                     $remaining = 0; // no time remaining in finished game
+                    $turnDeadline = null;
                 } else {
                     $gobj['game_finished'] = false;
                 }
             } catch (Throwable $ignore) {}
             $gobj['remaining_time'] = $remaining; // may be null if cannot compute
+            $gobj['turn_deadline'] = $turnDeadline;
         }
         // Write back into original structure
         if (isset($data[0]) && is_array($data[0])) {

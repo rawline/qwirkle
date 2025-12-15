@@ -6,7 +6,7 @@ import "./styles.css";
 
 ReactDOM.createRoot(document.getElementById("root")).render(
   <React.StrictMode>
-    <BrowserRouter basename="/~s373445/qwirkle/frontend">
+    <BrowserRouter basename="/">
       <App />
     </BrowserRouter>
   </React.StrictMode>

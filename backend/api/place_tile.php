@@ -79,6 +79,19 @@ try {
     $turnPlayer = (int) $stmt->fetchColumn();
     if ($turnPlayer !== $player_id) fail('Не ваш ход', 409);
 
+    // Determine current step id and block placement if player swapped tiles in this step
+    $stepId = null;
+    try {
+        $sstmt = $pdo->prepare('SELECT s.id_step FROM steps s JOIN players p ON p.player_id = s.id_player WHERE p.game_id = :gid ORDER BY s.id_step DESC LIMIT 1');
+        $sstmt->execute([':gid' => $game_id]);
+        $stepId = (int) $sstmt->fetchColumn();
+    } catch (Throwable $ignore) {
+        $stepId = null;
+    }
+    if ($stepId && has_swapped_in_step($pdo, $game_id, $stepId, $player_id)) {
+        fail('Нельзя выкладывать фишки после сброса в этом ходе', 409);
+    }
+
     // Verify tile belongs to player
     $stmt = $pdo->prepare('SELECT 1 FROM players_tiles WHERE id_player = :pid AND id_tile = :tid');
     $stmt->execute([':pid' => $player_id, ':tid' => $tile_id]);
@@ -179,15 +192,7 @@ try {
         if (count($verTiles) + 1 > 6) fail('Вертикальная линия не может содержать более 6 фишек', 409);
     }
 
-    // Determine current step id (for multi-tile turn rules)
-    $stepId = null;
-    try {
-        $sstmt = $pdo->prepare('SELECT s.id_step FROM steps s JOIN players p ON p.player_id = s.id_player WHERE p.game_id = :gid ORDER BY s.id_step DESC LIMIT 1');
-        $sstmt->execute([':gid' => $game_id]);
-        $stepId = (int) $sstmt->fetchColumn();
-    } catch (Throwable $ignore) {
-        $stepId = null;
-    }
+    // $stepId is already resolved above (used for swap-block + multi-tile-in-turn rules)
 
     if ($stepId) {
         $pstmt = $pdo->prepare('SELECT cords_x, cords_y FROM placed_tiles WHERE id_game = :gid AND id_step = :sid');

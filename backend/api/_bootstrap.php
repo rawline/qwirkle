@@ -29,6 +29,12 @@ function fail(string $message, int $code = 400): void
     respond(['error' => $message], $code);
 }
 
+// Game configuration
+define('MAX_TILES_IN_HAND', 6); // Reduced from 6 for faster gameplay
+
+// Bonus for the player who ends the game (empties hand when pool is empty)
+define('END_GAME_BONUS', 6);
+
 function read_json_body(): array
 {
     $raw = file_get_contents('php://input');
@@ -198,7 +204,7 @@ function auto_advance_turn(PDO $pdo, int $gameId): void
             for ($i = 0; $i < $stepsToAdd; $i++) {
                 $timedOutPlayerId = $players[$idx];
                 try {
-                    refill_player_tiles($pdo, (int)$timedOutPlayerId, 6);
+                    refill_player_tiles($pdo, (int)$timedOutPlayerId, MAX_TILES_IN_HAND);
                 } catch (Throwable $ignore) {}
                 $idx = ($idx + 1) % $count;
                 $ins->execute([':pid' => $players[$idx]]);
@@ -440,4 +446,66 @@ function compute_winner(PDO $pdo, int $gameId): ?int
     $stmt->execute([':gid' => $gameId]);
     $pid = $stmt->fetchColumn();
     return $pid ? (int)$pid : null;
+}
+
+// ---- Swap tracking helpers (per-step) ----
+function ensure_swaps_table(PDO $pdo): void
+{
+    try {
+        $pdo->exec('CREATE TABLE IF NOT EXISTS swaps (
+            id SERIAL PRIMARY KEY,
+            id_game INTEGER NOT NULL,
+            id_step INTEGER NOT NULL,
+            id_player INTEGER NOT NULL,
+            swapped_at TIMESTAMP NOT NULL DEFAULT NOW(),
+            UNIQUE (id_game, id_step, id_player)
+        )');
+    } catch (Throwable $e) {
+        // ignore
+    }
+}
+
+function has_swapped_in_step(PDO $pdo, int $gameId, int $stepId, int $playerId): bool
+{
+    if ($stepId <= 0) return false;
+    ensure_swaps_table($pdo);
+    $stmt = $pdo->prepare('SELECT 1 FROM swaps WHERE id_game = :gid AND id_step = :sid AND id_player = :pid');
+    $stmt->execute([':gid' => $gameId, ':sid' => $stepId, ':pid' => $playerId]);
+    return (bool)$stmt->fetchColumn();
+}
+
+function mark_swapped_in_step(PDO $pdo, int $gameId, int $stepId, int $playerId): void
+{
+    if ($stepId <= 0) return;
+    ensure_swaps_table($pdo);
+    $stmt = $pdo->prepare('INSERT INTO swaps (id_game, id_step, id_player)
+                           SELECT :gid, :sid, :pid
+                           WHERE NOT EXISTS (
+                               SELECT 1 FROM swaps WHERE id_game = :gid AND id_step = :sid AND id_player = :pid
+                           )');
+    $stmt->execute([':gid' => $gameId, ':sid' => $stepId, ':pid' => $playerId]);
+}
+
+function step_has_any_placement(PDO $pdo, int $gameId, int $stepId): bool
+{
+    if ($stepId <= 0) return false;
+    // placed_tiles table is created lazily; if absent, there were no placements
+    try {
+        $stmt = $pdo->prepare('SELECT 1 FROM placed_tiles WHERE id_game = :gid AND id_step = :sid LIMIT 1');
+        $stmt->execute([':gid' => $gameId, ':sid' => $stepId]);
+        return (bool)$stmt->fetchColumn();
+    } catch (Throwable $e) {
+        return false;
+    }
+}
+
+function game_all_hands_empty(PDO $pdo, int $gameId): bool
+{
+    $stmt = $pdo->prepare('SELECT COUNT(*)
+                           FROM players p
+                           JOIN players_tiles pt ON pt.id_player = p.player_id
+                           WHERE p.game_id = :gid');
+    $stmt->execute([':gid' => $gameId]);
+    $cnt = (int)$stmt->fetchColumn();
+    return $cnt === 0;
 }

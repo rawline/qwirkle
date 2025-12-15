@@ -60,8 +60,8 @@ try {
     $stmt->execute([':login' => $login, ':turn_order' => $next_order, ':game_id' => $game_id]);
     $player_id = (int) $stmt->fetchColumn();
 
-    // Deal initial tiles: refill player's rack up to 6 unique tiles for the game
-    refill_player_tiles($pdo, $player_id, 6);
+    // Deal initial tiles: refill player's rack up to MAX_TILES_IN_HAND unique tiles for the game
+    refill_player_tiles($pdo, $player_id, MAX_TILES_IN_HAND);
 
     $pdo->commit();
     // Если игра стала полной (players == seats), создаём/инициализируем текущий шаг на первого игрока

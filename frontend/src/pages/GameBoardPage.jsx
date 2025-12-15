@@ -7,6 +7,7 @@ import {
   getLogin,
   placeTile,
   finishTurn,
+  swapTiles,
 } from "../api/api.js";
 
 const errorToast = (text) => toast.error(text);
@@ -66,6 +67,7 @@ export default function GameBoardPage() {
   const [selectedTile, setSelectedTile] = useState(null);
   const [placing, setPlacing] = useState(false);
   const [finishing, setFinishing] = useState(false);
+  const [swapping, setSwapping] = useState(false);
   const [countdown, setCountdown] = useState(null);
 
   const isMyTurn = currentTurn && Number(currentTurn) === me;
@@ -105,27 +107,57 @@ export default function GameBoardPage() {
     }
   }, [gameFinished]);
 
-  // Live countdown using deadline
+  // Client-side timer with server resync.
+  // - We tick locally every second.
+  // - On each successful load(), server can update remaining_time + turn_deadline to correct drift.
   useEffect(() => {
-    if (!turnDeadline || !moveTime) {
-      setCountdown(timeLeft);
+    // If server didn't provide time, keep it null
+    if (timeLeft == null && !turnDeadline) {
+      setCountdown(null);
       return;
     }
-    const dl = new Date(turnDeadline).getTime();
-    function tick() {
-      const now = Date.now();
-      let left = Math.round((dl - now) / 1000);
-      if (left < 0) left = 0;
-      setCountdown(left);
-      if (left === 0) {
-        // Force refresh a moment after timeout to trigger server auto advance
-        setTimeout(() => load(), 300);
-      }
+
+    // Prefer absolute server deadline if present
+    const deadlineMs = turnDeadline ? new Date(turnDeadline).getTime() : null;
+    // Seed local countdown from server remaining_time (seconds)
+    if (typeof timeLeft === "number" && !Number.isNaN(timeLeft)) {
+      setCountdown((prev) => {
+        // If we already have a countdown, gently nudge to server value (avoid jitter)
+        if (typeof prev === "number" && Math.abs(prev - timeLeft) <= 1)
+          return prev;
+        return Math.max(0, Math.round(timeLeft));
+      });
     }
+
+    let timeoutFired = false;
+    const tick = () => {
+      setCountdown((prev) => {
+        let next = prev;
+
+        if (deadlineMs) {
+          const left = Math.round((deadlineMs - Date.now()) / 1000);
+          next = Math.max(0, left);
+        } else if (typeof prev === "number") {
+          next = Math.max(0, prev - 1);
+        } else if (typeof timeLeft === "number") {
+          next = Math.max(0, Math.round(timeLeft));
+        } else {
+          next = null;
+        }
+
+        // When reaches 0, trigger a refresh once to let backend auto-advance turn
+        if (next === 0 && !timeoutFired && !gameFinished) {
+          timeoutFired = true;
+          setTimeout(() => load(), 300);
+        }
+        return next;
+      });
+    };
+
     tick();
     const id = setInterval(tick, 1000);
     return () => clearInterval(id);
-  }, [turnDeadline, moveTime]);
+  }, [turnDeadline, timeLeft, gameFinished, gameId, playerId]);
 
   async function onBoardClick(e) {
     if (!selectedTile) return;
@@ -241,6 +273,29 @@ export default function GameBoardPage() {
     }
   }
 
+  async function onSwapTiles() {
+    if (lockout) {
+      infoToast("Игра завершена");
+      return;
+    }
+    if (!isMyTurn) {
+      errorToast("Сейчас не ваш ход");
+      return;
+    }
+    if (!confirm("Сбросить все фишки и получить новые из кучи?")) return;
+    try {
+      setSwapping(true);
+      await swapTiles(me);
+      setSelectedTile(null);
+      successToast("Фишки сброшены");
+      load();
+    } catch (err) {
+      errorToast(err.message);
+    } finally {
+      setSwapping(false);
+    }
+  }
+
   return (
     <div className="grid gameBoardPage">
       {gameFinished && (
@@ -298,7 +353,11 @@ export default function GameBoardPage() {
             </div>
             <div className="pill">
               Осталось на ход:{" "}
-              {gameFinished ? "—" : Math.round(timeLeft) + " секунд" || "—"}
+              {gameFinished
+                ? "—"
+                : typeof countdown === "number"
+                  ? `${countdown} секунд`
+                  : "—"}
             </div>
           </div>
         </section>
@@ -383,6 +442,14 @@ export default function GameBoardPage() {
 
         {isMyTurn && (
           <div className="row" style={{ marginTop: 32 }}>
+            <button
+              className="btn secondary"
+              onClick={onSwapTiles}
+              disabled={swapping || finishing || lockout}
+              title="Нельзя после выкладки; нельзя выкладывать после сброса"
+            >
+              {swapping ? "Сброс…" : "Сбросить фишки"}
+            </button>
             <button
               className="btn"
               onClick={onFinishTurn}

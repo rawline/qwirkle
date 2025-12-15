@@ -40,6 +40,11 @@ export default function GameListPage() {
 
   useEffect(() => {
     load();
+
+    // Обновляем список игр каждые 2 секунды
+    const interval = setInterval(load, 2000);
+
+    return () => clearInterval(interval);
   }, []);
 
   async function onCreateConfirm() {

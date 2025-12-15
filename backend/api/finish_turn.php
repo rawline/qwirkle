@@ -103,11 +103,9 @@ try {
     $remStmt->execute([':gid' => $game_id]);
     $remainingTiles = (int) $remStmt->fetchColumn();
 
-    // If player had zero tiles before refill and there are no remaining tiles, they finished the game
+    // End game bonus is granted only to the player who ends the whole game:
+    // pool is empty AND after this turn everybody has 0 tiles.
     $endGameBonus = 0;
-    if ($tilesBeforeRefill === 0 && $remainingTiles === 0) {
-        $endGameBonus = 6;
-    }
 
     // Now perform scoring, (optionally) refill, and possibly end the game inside a transaction
     $pdo->beginTransaction();
@@ -124,16 +122,48 @@ try {
     $nextIdx = ($idx === false) ? 0 : (($idx + 1) % count($asInts));
     $nextPlayerId = (int) $asInts[$nextIdx];
 
-    // End-of-game condition: player had 0 tiles before refill AND no remaining tiles in pool (for this game)
-    $gameFinished = ($tilesBeforeRefill === 0 && $remainingTiles === 0);
+    // We'll compute end condition after (optional) refill attempt.
+    // Game ends only when pool is empty AND all players have 0 tiles.
+    $gameFinished = false;
 
-    // Update player's score with computed delta and possible end-game bonus (once)
-    if ($scoreDelta !== 0 || $endGameBonus !== 0) {
+    // Update player's score with computed delta for this step
+    if ($scoreDelta !== 0) {
         $upd = $pdo->prepare('UPDATE players SET score = COALESCE(score,0) + :delta WHERE player_id = :pid');
-        $upd->execute([':delta' => $scoreDelta + $endGameBonus, ':pid' => $player_id]);
+        $upd->execute([':delta' => $scoreDelta, ':pid' => $player_id]);
     }
 
     $winnerId = null;
+
+    // Refill up to MAX_TILES_IN_HAND if possible (may do nothing when pool empty)
+    try {
+        refill_player_tiles($pdo, $player_id, MAX_TILES_IN_HAND);
+    } catch (Throwable $ignore) {
+        // ignore refill errors
+    }
+
+    // Determine whether the game is finished now.
+    $poolEmptyNow = ($remainingTiles === 0);
+    $allHandsEmptyNow = false;
+    try {
+        $allHandsEmptyNow = game_all_hands_empty($pdo, $game_id);
+    } catch (Throwable $ignore) {
+        $allHandsEmptyNow = false;
+    }
+    $gameFinished = ($poolEmptyNow && $allHandsEmptyNow);
+
+    // If game ends, grant bonus to the player who ended it (only once)
+    if ($gameFinished && $tilesBeforeRefill === 0) {
+        try {
+            if (get_game_finished($pdo, $game_id) === null) {
+                $endGameBonus = END_GAME_BONUS;
+                if ($endGameBonus !== 0) {
+                    $upd = $pdo->prepare('UPDATE players SET score = COALESCE(score,0) + :delta WHERE player_id = :pid');
+                    $upd->execute([':delta' => $endGameBonus, ':pid' => $player_id]);
+                }
+            }
+        } catch (Throwable $ignore) {}
+    }
+
     if ($gameFinished) {
         // Compute winner and mark finished; do not insert next step
         try {
@@ -141,12 +171,6 @@ try {
             if ($winnerId !== null) mark_game_finished($pdo, $game_id, $winnerId);
         } catch (Throwable $ignore) {}
     } else {
-        // Refill finisher's rack up to 6 before passing the turn
-        try {
-            refill_player_tiles($pdo, $player_id, 6);
-        } catch (Throwable $ignore) {
-            // ignore refill errors
-        }
         // Insert a new step for the next player (new id per turn)
         $ins = $pdo->prepare('INSERT INTO steps (id_player, step_begin) VALUES (:pid, NOW())');
         $ins->execute([':pid' => $nextPlayerId]);

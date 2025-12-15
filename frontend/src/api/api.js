@@ -97,6 +97,14 @@ export async function deleteGame(game_id) {
   return request("/delete_game.php", { method: "POST", body: { game_id } });
 }
 
+export async function swapTiles(player_id) {
+  // returns { success: true, my_tiles: [...] }
+  return request("/swap_tiles.php", {
+    method: "POST",
+    body: { player_id },
+  });
+}
+
 export async function placeTile({ player_id, tile_id, x, y }) {
   return request("/place_tile.php", {
     method: "POST",
